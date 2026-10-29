@@ -2535,6 +2535,9 @@ class OpenAIModel(LLMModel):
                     streaming_event = self._create_streaming_tool_call_response(accumulated_tool_calls,
                                                                                 delta_arguments,
                                                                                 streaming_tool_names)
+                    if streaming_event:
+                        streaming_event.response_id = response_id
+                        streaming_event.custom_metadata = {const.CHUNK: chunk_dict, const.TOOL_STREAMING: True}
 
                 if not self._verify_text_content_in_delta_response(chunk_dict):
                     if streaming_event:

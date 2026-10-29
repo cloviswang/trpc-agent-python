@@ -179,3 +179,47 @@ async def test_mixed_chunks_keep_text_through_anthropic_proxy():
     stops = [payload["index"] for payload in payloads if payload["type"] == "content_block_stop"]
     assert len(starts) == len(set(starts))
     assert sorted(starts) == sorted(stops)
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+@pytest.mark.asyncio
+async def test_streaming_tool_events_keep_response_identity_and_chunk_metadata(mixed):
+    deltas = [
+        {
+            "tool_calls": [tool_delta(0, '{"count":')]
+        },
+        {
+            "tool_calls": [tool_delta(0, '12}', first=False)]
+        },
+    ]
+    if mixed:
+        for delta in deltas:
+            delta["content"] = "text"
+    responses = await collect(deltas, {"tool_0"})
+    tool_events = [
+        response for response in responses[:-1] if any(part.function_call for part in response.content.parts)
+    ]
+    assert len(tool_events) == 2
+    for event, delta in zip(tool_events, deltas):
+        assert event.response_id == responses[-1].response_id == "synthetic-response"
+        assert event.custom_metadata[const.TOOL_STREAMING] is True
+        assert event.custom_metadata[const.CHUNK]["choices"][0]["delta"] == delta
+
+
+@pytest.mark.asyncio
+async def test_fragmented_invalid_json_in_mixed_chunks_keeps_error_envelope():
+    responses = await collect([
+        {
+            "content": "Recording ",
+            "tool_calls": [tool_delta(0, 'not-')]
+        },
+        {
+            "content": "now.",
+            "tool_calls": [tool_delta(0, 'json', first=False)]
+        },
+    ], {"tool_0"})
+    assert [bool(response.content.parts[0].text) for response in responses[:-1]] == [True, False, True, False]
+    call = next(part.function_call for part in responses[-1].content.parts if part.function_call)
+    assert call.name == "tool_0"
+    assert const.TOOL_CALL_ARGUMENT_ERRORS in call.args
+    assert responses[-1].error_code is None
