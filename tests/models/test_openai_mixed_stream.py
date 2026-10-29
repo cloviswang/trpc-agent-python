@@ -130,3 +130,52 @@ async def test_one_mixed_fragment_cannot_silently_change_arguments(mixed_index):
         for part in response.content.parts if part.function_call
     ]
     assert streamed == fragments
+
+
+@pytest.mark.asyncio
+async def test_mixed_chunk_text_precedes_streaming_tool_event():
+    responses = await collect([{
+        "content": "Recording now.",
+        "tool_calls": [tool_delta(0, '{"count":12}')]
+    }], {"tool_0"})
+    assert responses[0].partial
+    assert responses[0].content.parts[0].text == "Recording now."
+    assert responses[1].partial
+    assert responses[1].content.parts[0].function_call.name == "tool_0"
+
+
+@pytest.mark.asyncio
+async def test_mixed_chunks_keep_text_through_anthropic_proxy():
+    pytest.importorskip("claude_agent_sdk")
+    from trpc_agent_sdk.server.agents.claude._proxy import AnthropicMessagesRequest, AnthropicProxyApp
+
+    responses = await collect([
+        {
+            "content": "Recording ",
+            "tool_calls": [tool_delta(0, '{"count":')]
+        },
+        {
+            "content": "now.",
+            "tool_calls": [tool_delta(0, '12}', first=False)]
+        },
+    ], {"tool_0"})
+
+    async def generate(request, stream=True):
+        for response in responses:
+            yield response
+
+    model = SimpleNamespace(generate_async=generate)
+    request = AnthropicMessagesRequest(model="synthetic", messages=[{"role": "user", "content": "record"}], stream=True)
+    events = [event async for event in AnthropicProxyApp()._handle_streaming(LlmRequest(), request, model)]
+    payloads = [
+        json.loads(line[6:]) for event in events for line in event.splitlines()
+        if line.startswith("data: ") and line != "data: [DONE]"
+    ]
+    deltas = [payload["delta"] for payload in payloads if payload["type"] == "content_block_delta"]
+    assert "".join(delta["text"] for delta in deltas if delta["type"] == "text_delta") == "Recording now."
+    assert "".join(delta["partial_json"] for delta in deltas if delta["type"] == "input_json_delta") == '{"count":12}'
+
+    starts = [payload["index"] for payload in payloads if payload["type"] == "content_block_start"]
+    stops = [payload["index"] for payload in payloads if payload["type"] == "content_block_stop"]
+    assert len(starts) == len(set(starts))
+    assert sorted(starts) == sorted(stops)

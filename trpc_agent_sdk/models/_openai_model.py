@@ -2525,7 +2525,9 @@ class OpenAIModel(LLMModel):
                 if usage:
                     last_usage = usage
 
-                # If streaming tool call arguments is enabled, yield partial tool call events
+                # Emit text before tool events from the same chunk for streaming consumers.
+                streaming_event = None
+                # If streaming tool call arguments is enabled, prepare partial tool call events
                 # delta_arguments being non-empty means tool calls were processed
                 if streaming_tool_names and delta_arguments and accumulated_tool_calls:
                     # Yield streaming tool call event with delta arguments
@@ -2533,15 +2535,17 @@ class OpenAIModel(LLMModel):
                     streaming_event = self._create_streaming_tool_call_response(accumulated_tool_calls,
                                                                                 delta_arguments,
                                                                                 streaming_tool_names)
-                    if streaming_event:
-                        yield streaming_event
 
                 if not self._verify_text_content_in_delta_response(chunk_dict):
+                    if streaming_event:
+                        yield streaming_event
                     continue
 
                 # Process chunk with valid content
                 choices = chunk_dict.get(const.CHOICES, [])
                 if not choices:
+                    if streaming_event:
+                        yield streaming_event
                     continue  # Skip if no choices available
                 choice: dict[str, dict] = choices[0]
                 delta = choice[const.DELTA]
@@ -2557,6 +2561,8 @@ class OpenAIModel(LLMModel):
                             partial_text = self._adapter.filter_streaming_text(reasoning_content,
                                                                                reasoning_filter_state)
                         if not partial_text:
+                            if streaming_event:
+                                yield streaming_event
                             continue
 
                         # Reasoning content is always thinking content
@@ -2588,6 +2594,8 @@ class OpenAIModel(LLMModel):
                             content_filter_state = streaming_text_filter_state["content"]
                             partial_text = self._adapter.filter_streaming_text(content, content_filter_state)
                         if not partial_text:
+                            if streaming_event:
+                                yield streaming_event
                             continue
                         if not is_thinking:
                             visible_content += partial_text
@@ -2603,6 +2611,8 @@ class OpenAIModel(LLMModel):
                             response_id=response_id,
                             custom_metadata={const.CHUNK: chunk_dict},
                         )
+                if streaming_event:
+                    yield streaming_event
 
             if tool_prompt and streaming_text_filter_state is not None:
                 if self._adapter.should_filter_reasoning_text():
