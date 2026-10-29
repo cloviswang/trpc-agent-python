@@ -223,3 +223,44 @@ async def test_fragmented_invalid_json_in_mixed_chunks_keeps_error_envelope():
     assert call.name == "tool_0"
     assert const.TOOL_CALL_ARGUMENT_ERRORS in call.args
     assert responses[-1].error_code is None
+
+
+@pytest.mark.asyncio
+async def test_proxy_closes_open_blocks_when_interleaved_stream_fails():
+    pytest.importorskip("claude_agent_sdk")
+    from trpc_agent_sdk.server.agents.claude._proxy import AnthropicMessagesRequest, AnthropicProxyApp
+
+    responses = await collect([
+        {
+            "content": "Recording ",
+            "tool_calls": [tool_delta(0, '{"count":')]
+        },
+        {
+            "content": "now."
+        },
+    ], {"tool_0"})
+
+    async def generate(request, stream=True):
+        for response in responses[:-1]:
+            yield response
+        raise RuntimeError("test stream interrupted")
+
+    request = AnthropicMessagesRequest(model="synthetic", messages=[{"role": "user", "content": "record"}], stream=True)
+    model = SimpleNamespace(generate_async=generate)
+    events = [event async for event in AnthropicProxyApp()._handle_streaming(LlmRequest(), request, model)]
+    payloads = [
+        json.loads(line[6:]) for event in events for line in event.splitlines()
+        if line.startswith("data: ") and line != "data: [DONE]"
+    ]
+    open_blocks = set()
+    for payload in payloads:
+        if payload["type"] == "content_block_start":
+            assert payload["index"] not in open_blocks
+            open_blocks.add(payload["index"])
+        elif payload["type"] == "content_block_stop":
+            assert payload["index"] in open_blocks
+            open_blocks.remove(payload["index"])
+        elif payload["type"] in {"message_delta", "message_stop"}:
+            assert not open_blocks
+    assert not open_blocks
+    assert next(p for p in payloads if p["type"] == "message_delta")["delta"]["stop_reason"] == "error"

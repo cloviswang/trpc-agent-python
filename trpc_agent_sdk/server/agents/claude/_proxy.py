@@ -705,6 +705,9 @@ class AnthropicProxyApp:
         Yields:
             Server-sent events in Anthropic format
         """
+        text_block_closed = True
+        text_block_index = 0
+        streaming_tool_calls: Dict[str, Dict[str, Any]] = {}
         try:
             # Send message_start event
             message_id = f"msg_{uuid.uuid4().hex[:24]}"
@@ -749,7 +752,6 @@ class AnthropicProxyApp:
             text_block_index = 0
             last_usage = None
             # Track streaming tool calls: {tool_id: {"index": int, "name": str, "started": bool}}
-            streaming_tool_calls: Dict[str, Dict[str, Any]] = {}
             next_tool_index = 0  # Shared index allocator for text and tool blocks
 
             # Call model with streaming
@@ -952,6 +954,18 @@ class AnthropicProxyApp:
 
         except Exception as ex:  # pylint: disable=broad-except
             self.logger.error("Error in streaming: %s", str(ex))
+            # Close started blocks before terminating the interrupted message.
+            open_indices = []
+            if not text_block_closed:
+                open_indices.append(text_block_index)
+                text_block_closed = True
+            for tool_info in streaming_tool_calls.values():
+                if tool_info.get("started") and not tool_info.get("closed"):
+                    open_indices.append(tool_info["index"])
+                    tool_info["closed"] = True
+            for index in sorted(open_indices):
+                stop_event = {"type": "content_block_stop", "index": index}
+                yield f"event: content_block_stop\ndata: {json.dumps(stop_event)}\n\n"
             # Send error response to client
             error_data = {
                 "type": "message_delta",
